@@ -12,7 +12,7 @@ from rich.live import Live
 from src.config import RAGConfig
 from src.generator import answer, dedupe_generated_text
 from src.index_builder import build_index
-from src.instrumentation.logging import init_logger, get_logger, RunLogger
+from src.instrumentation.logging import get_logger, RunLogger
 from src.ranking.ranker import EnsembleRanker
 from src.preprocessing.chunking import DocumentChunker
 from src.retriever import filter_retrieved_chunks, BM25Retriever, FAISSRetriever, IndexKeywordRetriever, load_artifacts
@@ -220,9 +220,9 @@ def get_answer(
                     "index_score": index_scores.get(idx, 0),
                     "index_rank": index_ranks.get(idx, 0),
                 })
-        
+
         # Step 3: Final re-ranking
-        ranked_chunks = rerank(question, ranked_chunks, mode=cfg.rerank_mode, top_n=cfg.top_k)
+        ranked_chunks = rerank(question, ranked_chunks, mode=cfg.rerank_mode, top_n=cfg.rerank_top_k)
 
     # If no chunks found, return answer not found message
     if ranked_chunks == []:
@@ -375,8 +375,6 @@ def main():
         raise FileNotFoundError(
             "No config file provided at config/config.yaml."
         )
-
-    init_logger(cfg)
 
     if args.mode == "index":
         run_index_mode(args, cfg)
