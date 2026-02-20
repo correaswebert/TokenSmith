@@ -1,7 +1,7 @@
 import argparse
 import pathlib
 import sys
-import logging
+import json
 from rich.console import Console
 
 # Adjust path to include src if run from root
@@ -9,43 +9,50 @@ sys.path.append(".")
 
 from src.config import RAGConfig
 from src.main import get_answer, load_artifacts
-from src.instrumentation.logging import init_logger, get_logger
+from src.instrumentation.logging import init_logger, get_logger, load_session_logs
 from src.retriever import FAISSRetriever, BM25Retriever, IndexKeywordRetriever
 from src.ranking.ranker import EnsembleRanker
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Scheduler: Run TokenSmith with high-spec configuration.")
-    parser.add_argument("--query", type=str, required=True, help="The query to run.")
+    parser = argparse.ArgumentParser(description="Scheduler: Replay TokenSmith queries from a past session log.")
+    parser.add_argument("--session_id", type=str, required=True, help="The session ID to replay (e.g. 20260220_072618).")
+    parser.add_argument("--config", default="config/config.yaml", help="Path to the new config to apply (default: config/config.yaml).")
     parser.add_argument("--index_prefix", default="textbook_index", help="Prefix for generated index files.")
-    parser.add_argument("--system_prompt_mode", default="detailed", help="System prompt mode (default: detailed).")
-    parser.add_argument("--model_path", default="models/qwen2.5-7b-instruct-q5_k_m.gguf", help="Path to high-spec model.")
     return parser.parse_args()
+
+def extract_queries_from_session(session_id: str) -> list[str]:
+    logs = load_session_logs(session_id)
+    queries = []
+    for entry in logs:
+        if entry.get("event") == "query" and "query" in entry:
+            queries.append(entry["query"])
+    return queries
 
 def main():
     args = parse_args()
 
-    config_path = pathlib.Path("config/config.yaml")
+    # Load new config
+    config_path = pathlib.Path(args.config)
     if config_path.exists():
         cfg = RAGConfig.from_yaml(config_path)
     else:
-        print("Error: config/config.yaml not found.")
+        print(f"Error: {args.config} not found.")
         sys.exit(1)
 
-    print(f"Applying High-Spec Overrides...")
-    cfg.top_k = 15
-    cfg.num_candidates = 80
-    cfg.rrf_k = 100
-    cfg.max_gen_tokens = 1024
-    cfg.gen_model = args.model_path 
-    cfg.system_prompt_mode = args.system_prompt_mode
+    queries = extract_queries_from_session(args.session_id)
+    if not queries:
+        print(f"No queries found for session '{args.session_id}'. Check the logs/ folder.")
+        sys.exit(1)
 
-    print(f"Configuration: Top-K={cfg.top_k}, Candidates={cfg.num_candidates}, Model={cfg.gen_model}")
+    print(f"Found {len(queries)} queries in session '{args.session_id}'. Replaying them...")
+    print(f"Using config '{args.config}': Top-K={cfg.top_k}, Candidates={cfg.num_candidates}, Model={cfg.gen_model}")
 
+    # Initialize Logger and artifacts
     init_logger(cfg)
     logger = get_logger()
     console = Console()
 
-    print("Initializing artifacts...")
+    print("\nInitializing pipeline artifacts...")
     try:
         artifacts_dir = cfg.get_artifacts_directory()
         faiss_index, bm25_index, chunks, sources, meta = load_artifacts(
@@ -80,14 +87,23 @@ def main():
         print(f"ERROR: Failed to initialize artifacts: {e}")
         sys.exit(1)
 
-    print(f"\nRunning Query: {args.query}\n")
-    try:
-        ans = get_answer(args.query, cfg, args, logger, console, artifacts=artifacts)
-        logger.log_generation(ans, {"max_tokens": cfg.max_gen_tokens, "model_path": cfg.gen_model})
-        logger.log_query_complete()
-    except Exception as e:
-        print(f"Error during generation: {e}")
-        logger.log_error(e)
+    print("\nStarting Replay...")
+    for idx, query in enumerate(queries, 1):
+        print(f"\n========================================================")
+        print(f"Query {idx}/{len(queries)}: [ {query} ]")
+        print(f"========================================================")
+        try:
+            # We use an empty namespace for args parameter needed by get_answer
+            dummy_args = argparse.Namespace(system_prompt_mode=None) 
+            ans = get_answer(query, cfg, dummy_args, logger, console, artifacts=artifacts)
+            logger.log_generation(ans, {"max_tokens": cfg.max_gen_tokens, "model_path": cfg.gen_model})
+            logger.log_query_complete()
+        except Exception as e:
+            print(f"\nError during query execution: {e}")
+            logger.log_error(e)
+
+    print("\nReplay finished. Generating new session log.")
+    print(f"View the new metrics with: python src/instrumentation/analyze_logs.py --session_id {logger.session_id}")
 
 if __name__ == "__main__":
     main()
